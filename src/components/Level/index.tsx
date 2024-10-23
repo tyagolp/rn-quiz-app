@@ -30,7 +30,7 @@ export function Level({
   isChecked = false,
   ...rest
 }: Props) {
-  const scale = useSharedValue(1.5);
+  const scale = useSharedValue(1);
   const checked = useSharedValue(1);
 
   const COLOR = TYPE_COLORS[type];

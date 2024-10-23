@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, ScrollView, Text, View } from "react-native";
+import { Alert, BackHandler, Text, View } from "react-native";
 
 import { useNavigation, useRoute } from "@react-navigation/native";
 
@@ -17,6 +17,7 @@ import Animated, {
   Easing,
   Extrapolate,
   interpolate,
+  runOnJS,
   useAnimatedScrollHandler,
   useAnimatedStyle,
   useSharedValue,
@@ -25,12 +26,19 @@ import Animated, {
 } from "react-native-reanimated";
 import { ProgressBar } from "../../components/ProgressBar";
 import { THEME } from "../../styles/theme";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { OverlayFeedback } from "../../components/OverlayFeedback";
+import { Audio } from "expo-av";
+import * as Haptics from "expo-haptics";
 
 interface Params {
   id: string;
 }
 
 type QuizProps = (typeof QUIZ)[0];
+
+const CARD_INCLINATION = 10;
+const CARD_SKIP_AREA = -200;
 
 export function Quiz() {
   const [points, setPoints] = useState(0);
@@ -40,14 +48,27 @@ export function Quiz() {
   const [alternativeSelected, setAlternativeSelected] = useState<null | number>(
     null
   );
+  const [statusReply, setStatusReply] = useState(0);
 
   const shake = useSharedValue(0);
   const scrollY = useSharedValue(0);
+  const cardPosition = useSharedValue(0);
 
   const { navigate } = useNavigation();
 
   const route = useRoute();
   const { id } = route.params as Params;
+
+  async function playSound(isCorrect: boolean) {
+    const file = isCorrect
+      ? require("../../assets/corret.mp3")
+      : require("../../assets/wrong.mp3");
+
+    const { sound } = await Audio.Sound.createAsync(file, {});
+
+    sound.setPositionAsync(0);
+    sound.playAsync();
+  }
 
   function handleSkipConfirm() {
     Alert.alert("Pular", "Deseja realmente pular a questão?", [
@@ -86,7 +107,13 @@ export function Quiz() {
 
     if (quiz.questions[currentQuestion].correct === alternativeSelected) {
       setPoints((prevState) => prevState + 1);
+
+      await playSound(true);
+      setStatusReply(1);
+      handleNextQuestion();
     } else {
+      await playSound(false);
+      setStatusReply(2);
       shakeAnimation();
     }
 
@@ -109,10 +136,16 @@ export function Quiz() {
     return true;
   }
 
-  function shakeAnimation() {
+  async function shakeAnimation() {
+    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     shake.value = withSequence(
       withTiming(3, { duration: 400, easing: Easing.bounce }),
-      withTiming(0)
+      withTiming(0, undefined, (finishied) => {
+        "worklet";
+        if (finishied) {
+          runOnJS(handleNextQuestion)();
+        }
+      })
     );
   }
 
@@ -164,6 +197,33 @@ export function Quiz() {
     };
   });
 
+  const onPan = Gesture.Pan()
+    .activateAfterLongPress(200)
+    .onUpdate((event) => {
+      const moveToLeft = event.translationX < 0;
+      if (moveToLeft) cardPosition.value = event.translationX;
+    })
+    .onEnd((event) => {
+      if (event.translationX < CARD_SKIP_AREA) {
+        runOnJS(handleSkipConfirm)();
+      }
+      cardPosition.value = withTiming(0);
+    });
+
+  const dragStyles = useAnimatedStyle(() => {
+    const rotateZ = cardPosition.value / CARD_INCLINATION;
+    return {
+      transform: [
+        {
+          translateX: cardPosition.value,
+        },
+        {
+          rotateZ: `${rotateZ}deg`,
+        },
+      ],
+    };
+  });
+
   useEffect(() => {
     const quizSelected = QUIZ.filter((item) => item.id === id)[0];
     setQuiz(quizSelected);
@@ -171,10 +231,13 @@ export function Quiz() {
   }, []);
 
   useEffect(() => {
-    if (quiz.questions) {
-      handleNextQuestion();
-    }
-  }, [points]);
+    const backHandler = BackHandler.addEventListener(
+      "hardwareBackPress",
+      handleStop
+    );
+
+    return () => backHandler.remove();
+  }, []);
 
   if (isLoading) {
     return <Loading />;
@@ -182,6 +245,8 @@ export function Quiz() {
 
   return (
     <View style={styles.container}>
+      <OverlayFeedback status={statusReply} />
+
       <Animated.View style={fixedProgressBarStyles}>
         <Text style={styles.title}>{quiz.title}</Text>
         <ProgressBar
@@ -203,14 +268,18 @@ export function Quiz() {
             totalOfQuestions={quiz.questions.length}
           />
         </Animated.View>
-        <Animated.View style={shakeStyleAnimated}>
-          <Question
-            key={quiz.questions[currentQuestion].title}
-            question={quiz.questions[currentQuestion]}
-            alternativeSelected={alternativeSelected}
-            setAlternativeSelected={setAlternativeSelected}
-          />
-        </Animated.View>
+
+        <GestureDetector gesture={onPan}>
+          <Animated.View style={[shakeStyleAnimated, dragStyles]}>
+            <Question
+              key={quiz.questions[currentQuestion].title}
+              question={quiz.questions[currentQuestion]}
+              alternativeSelected={alternativeSelected}
+              setAlternativeSelected={setAlternativeSelected}
+              onUnmount={() => setStatusReply(0)}
+            />
+          </Animated.View>
+        </GestureDetector>
 
         <View style={styles.footer}>
           <OutlineButton title="Parar" onPress={handleStop} />
